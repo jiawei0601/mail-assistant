@@ -320,8 +320,17 @@ def main():
     print(f"找到資料夾: {inbox.FolderPath} (共 {inbox.Items.Count} 封)")
 
     processed = load_state()
-    items = list(inbox.Items)
-    items.sort(key=lambda m: m.ReceivedTime, reverse=True)
+    try:
+        inbox.Items.Sort("[ReceivedTime]", True)
+    except Exception:
+        pass
+    items = []
+    for it in inbox.Items:
+        try:
+            if getattr(it, "Class", 0) == 43:
+                items.append(it)
+        except Exception:
+            continue
 
     skipped = 0
     rule_handled = 0
