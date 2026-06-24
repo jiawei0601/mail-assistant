@@ -216,17 +216,26 @@ class GeminiProvider:
         self.model = model
 
     def call_one(self, prompt):
-        resp = self.client.models.generate_content(model=self.model, contents=prompt)
+        from google.genai import types
+        resp = self.client.models.generate_content(
+            model=self.model,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                http_options=types.HttpOptions(timeout=60000),
+            ),
+        )
         return resp.text
 
     def call_batch(self, prompts):
-        """Gemini 沒有 Anthropic 式 batch,逐筆呼叫但成本本身比 Claude 低。"""
+        """Gemini 沒有 Anthropic 式 batch,逐筆呼叫並顯示進度。"""
         out = {}
-        for cid, p in prompts.items():
+        total = len(prompts)
+        for i, (cid, p) in enumerate(prompts.items(), 1):
+            print(f"  [{i}/{total}] {cid}...", flush=True)
             try:
                 out[cid] = self.call_one(p)
             except Exception as e:
-                print(f"  Gemini {cid} 失敗: {e}")
+                print(f"    失敗: {e}", flush=True)
         return out
 
 
@@ -270,13 +279,15 @@ def make_provider(cfg):
 
 def process_sync(provider, mail_map, cfg):
     results = {}
-    for cid, mail in mail_map.items():
+    total = len(mail_map)
+    for i, (cid, mail) in enumerate(mail_map.items(), 1):
         try:
+            print(f"  [{i}/{total}] {(mail.Subject or '')[:50]}", flush=True)
             text = provider.call_one(build_prompt(mail, cfg["max_body_chars"]))
             results[cid] = parse_result(text)
-            print(f"  [sync] {cid}: {results[cid].get('category')}")
+            print(f"    -> {results[cid].get('category')}", flush=True)
         except Exception as e:
-            print(f"  [sync] {cid} 失敗: {e}")
+            print(f"    失敗: {e}", flush=True)
     return results
 
 
