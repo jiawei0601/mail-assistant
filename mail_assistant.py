@@ -171,6 +171,61 @@ subject: {mail.Subject}
     return date_dir / fname
 
 
+class FakeMail:
+    """重建 HTML 用的 mail 替身"""
+    def __init__(self, sender, subject, received_time):
+        self.SenderName = sender
+        self.Subject = subject
+        self.ReceivedTime = received_time
+
+
+def rebuild_digest_from_md(output_dir):
+    """掃 output 下所有 .md 重建 HTML 追蹤清單(不打 API)"""
+    from datetime import datetime
+    digest = []
+    md_files = list(output_dir.rglob("*.md"))
+    print(f"找到 {len(md_files)} 個 .md 檔")
+    for md in md_files:
+        try:
+            text = md.read_text(encoding="utf-8")
+            # 解析 YAML frontmatter
+            m = re.match(r"^---\n(.*?)\n---\n(.*)$", text, re.DOTALL)
+            if not m:
+                continue
+            fm_text, body = m.group(1), m.group(2)
+            fm = {}
+            for line in fm_text.split("\n"):
+                if ":" in line:
+                    k, v = line.split(":", 1)
+                    fm[k.strip()] = v.strip()
+            # 解析 body 裡的 summary 與待辦
+            sum_match = re.search(r"## 摘要\n(.*?)(?=\n## |\Z)", body, re.DOTALL)
+            summary = sum_match.group(1).strip() if sum_match else ""
+            actions = []
+            todo_match = re.search(r"## 待辦\n(.*?)(?=\n## |\Z)", body, re.DOTALL)
+            if todo_match:
+                for line in todo_match.group(1).split("\n"):
+                    am = re.match(r"-\s*\[\s*\]\s*(.+)", line.strip())
+                    if am and am.group(1) != "(無)":
+                        actions.append(am.group(1).strip())
+            try:
+                dt = datetime.strptime(fm.get("date", ""), "%Y-%m-%d %H:%M")
+            except ValueError:
+                dt = datetime.now()
+            fake = FakeMail(fm.get("from", ""), fm.get("subject", ""), dt)
+            result = {
+                "category": fm.get("category", "其他"),
+                "priority": fm.get("priority", "medium"),
+                "summary": summary,
+                "action_items": actions,
+            }
+            digest.append((fake, result))
+        except Exception as e:
+            print(f"解析失敗 {md.name}: {e}")
+    write_digest(digest, output_dir)
+    print(f"重建完成 ({len(digest)} 筆): {output_dir / '_追蹤清單.html'}")
+
+
 def write_digest(digest, output_dir):
     """跑完總結:HTML 追蹤清單"""
     from datetime import datetime
@@ -467,6 +522,14 @@ def main():
     if len(sys.argv) > 1 and sys.argv[1] in ("--list-models", "-l"):
         provider_name = sys.argv[2] if len(sys.argv) > 2 else "gemini"
         list_models(provider_name.lower())
+        return
+
+    if len(sys.argv) > 1 and sys.argv[1] in ("--digest", "-d"):
+        cfg = load_config()
+        output_dir = Path(cfg["output_dir"])
+        if not output_dir.is_absolute():
+            output_dir = APP_DIR / output_dir
+        rebuild_digest_from_md(output_dir)
         return
 
     cfg = load_config()
