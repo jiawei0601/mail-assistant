@@ -230,6 +230,35 @@ class GeminiProvider:
         return out
 
 
+def list_models(provider_name):
+    """列出 provider 目前可用模型"""
+    if provider_name == "gemini":
+        from google import genai
+        api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+        if not api_key:
+            print("請先設 GEMINI_API_KEY")
+            return
+        client = genai.Client(api_key=api_key)
+        print(f"\n=== Gemini 可用模型 ===")
+        for m in client.models.list():
+            methods = getattr(m, "supported_actions", None) or getattr(m, "supported_generation_methods", [])
+            if not methods or "generateContent" in methods:
+                name = m.name.replace("models/", "")
+                display = getattr(m, "display_name", "") or ""
+                print(f"  {name:50s} {display}")
+    elif provider_name == "anthropic":
+        from anthropic import Anthropic
+        if not os.environ.get("ANTHROPIC_API_KEY"):
+            print("請先設 ANTHROPIC_API_KEY")
+            return
+        client = Anthropic()
+        print(f"\n=== Anthropic 可用模型 ===")
+        for m in client.models.list(limit=50).data:
+            print(f"  {m.id:45s} {m.display_name}")
+    else:
+        print(f"未知 provider: {provider_name}")
+
+
 def make_provider(cfg):
     p = cfg.get("provider", "anthropic").lower()
     if p == "anthropic":
@@ -265,6 +294,11 @@ def process_batch(provider, mail_map, cfg):
 
 
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] in ("--list-models", "-l"):
+        provider_name = sys.argv[2] if len(sys.argv) > 2 else "gemini"
+        list_models(provider_name.lower())
+        return
+
     cfg = load_config()
     provider_name = cfg.get("provider", "anthropic").lower()
     if provider_name == "anthropic" and not os.environ.get("ANTHROPIC_API_KEY"):

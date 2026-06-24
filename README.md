@@ -33,6 +33,18 @@ build.bat
 
 EXE 產出在 `dist\MailAssistant.exe`。
 
+## 列出可用模型
+
+```bash
+MailAssistant.exe --list-models gemini
+MailAssistant.exe --list-models anthropic
+```
+
+從原始碼跑:
+```bash
+python mail_assistant.py --list-models gemini
+```
+
 ## 設定檔說明 (config.json)
 
 | 欄位 | 說明 |
