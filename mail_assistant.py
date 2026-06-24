@@ -115,7 +115,24 @@ def build_prompt(mail, max_chars):
 def parse_result(text):
     text = text.strip()
     text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.MULTILINE)
-    return json.loads(text)
+    data = json.loads(text)
+    # 防呆:summary 偶爾被回成 list
+    s = data.get("summary")
+    if isinstance(s, list):
+        data["summary"] = "\n".join(str(x) for x in s)
+    elif s is not None and not isinstance(s, str):
+        data["summary"] = str(s)
+    # action_items 確保是 list of str
+    ai = data.get("action_items", [])
+    if not isinstance(ai, list):
+        data["action_items"] = [str(ai)] if ai else []
+    else:
+        data["action_items"] = [str(x) for x in ai]
+    # category / priority 確保 string
+    for k in ("category", "priority"):
+        if k in data and not isinstance(data[k], str):
+            data[k] = str(data[k])
+    return data
 
 
 def write_markdown(mail, result, output_dir):
