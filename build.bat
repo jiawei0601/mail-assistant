@@ -4,6 +4,7 @@ pyinstaller --onefile --name MailAssistant ^
   --hidden-import win32com.client ^
   --hidden-import pythoncom ^
   --hidden-import anthropic ^
+  --hidden-import google.genai ^
   mail_assistant.py
 
 echo.

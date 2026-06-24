@@ -2,6 +2,12 @@
   "pst_display_name": "JWChang20260325",
   "folder_name": "Inbox",
   "output_dir": "output",
+  "provider": "anthropic",
   "model": "claude-haiku-4-5-20251001",
-  "max_body_chars": 8000
+  "_comment_provider": "anthropic 或 gemini。gemini 範例 model: gemini-2.5-flash",
+  "max_body_chars": 2000,
+  "min_body_chars": 200,
+  "batch_threshold": 10,
+  "skip_senders": ["noreply", "no-reply", "notification", "notifications", "system", "donotreply", "do-not-reply", "mailer-daemon", "postmaster"],
+  "skip_subject_keywords": ["Auto:", "自動回覆", "Out of Office", "Undeliverable", "退信", "Delivery Status", "Newsletter", "電子報"]
 }

@@ -1,18 +1,20 @@
 """
-PST 信件 AI 摘要助手
-讀 Outlook PST 收件匣,用 Claude 產摘要與分類,輸出 markdown。
-設定見 config.json (從 config.example.json 複製修改)。
+PST 信件 AI 摘要助手 (v0.2)
+- 預過濾系統信/自動回覆/廣告 -> 不打 API
+- 短信跳過 API
+- 大量信件用 Batch API (5 折)
+- 內文截短預設 2000 字
 """
 
 import os
 import re
 import sys
 import json
+import time
 from pathlib import Path
 
 import win32com.client
 import pythoncom
-from anthropic import Anthropic
 
 
 def app_dir():
@@ -46,11 +48,7 @@ SUMMARY_PROMPT = """你是一個郵件助理。請閱讀以下郵件,輸出 JSON
 
 def load_config():
     if not CONFIG_PATH.exists():
-        example = APP_DIR / "config.example.json"
-        if example.exists():
-            print(f"找不到 config.json,請複製 config.example.json 為 config.json 並修改。")
-        else:
-            print(f"找不到 config.json,路徑: {CONFIG_PATH}")
+        print(f"找不到 config.json,請複製 config.example.json 為 config.json 並修改。")
         sys.exit(1)
     return json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
 
@@ -73,7 +71,7 @@ def find_pst_folder(ns, pst_name, folder_name):
                 if folder.Name.lower() == folder_name.lower() or folder.Name in ("收件匣", "收件箱", "Inbox"):
                     return folder
             return root.Folders.Item(1)
-    raise RuntimeError(f"找不到 PST: {pst_name}。請確認 Outlook 已開啟並掛載此 PST。")
+    raise RuntimeError(f"找不到 PST: {pst_name}")
 
 
 def safe_filename(s, maxlen=80):
@@ -81,20 +79,41 @@ def safe_filename(s, maxlen=80):
     return s[:maxlen].strip() or "untitled"
 
 
-def summarize(client, mail, model, max_chars):
+def should_skip(mail, cfg):
+    """規則過濾 — 不打 API 直接分類"""
+    sender = (getattr(mail, "SenderEmailAddress", "") or "").lower()
+    sender_name = (mail.SenderName or "").lower()
+    subject = mail.Subject or ""
+
+    for kw in cfg.get("skip_senders", []):
+        if kw.lower() in sender or kw.lower() in sender_name:
+            return "系統通知"
+    for kw in cfg.get("skip_subject_keywords", []):
+        if kw.lower() in subject.lower():
+            return "自動郵件"
+
+    if getattr(mail, "MessageClass", "").startswith("IPM.Schedule"):
+        return "會議邀請"
+
+    body = mail.Body or ""
+    if len(body.strip()) < cfg.get("min_body_chars", 200):
+        return "簡短訊息"
+
+    return None
+
+
+def build_prompt(mail, max_chars):
     body = (mail.Body or "")[:max_chars]
-    prompt = SUMMARY_PROMPT.format(
+    return SUMMARY_PROMPT.format(
         sender=mail.SenderName or "(unknown)",
         subject=mail.Subject or "(no subject)",
         date=str(mail.ReceivedTime),
         body=body,
     )
-    resp = client.messages.create(
-        model=model,
-        max_tokens=1024,
-        messages=[{"role": "user", "content": prompt}],
-    )
-    text = resp.content[0].text.strip()
+
+
+def parse_result(text):
+    text = text.strip()
     text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.MULTILINE)
     return json.loads(text)
 
@@ -135,12 +154,124 @@ subject: {mail.Subject}
     return date_dir / fname
 
 
+def rule_based_result(mail, category):
+    return {
+        "category": category,
+        "summary": (mail.Body or "")[:300].strip() or "(空)",
+        "action_items": [],
+        "priority": "low",
+    }
+
+
+class AnthropicProvider:
+    def __init__(self, model):
+        from anthropic import Anthropic
+        self.client = Anthropic()
+        self.model = model
+
+    def call_one(self, prompt):
+        resp = self.client.messages.create(
+            model=self.model,
+            max_tokens=1024,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return resp.content[0].text
+
+    def call_batch(self, prompts):
+        """custom_id -> prompt;回傳 custom_id -> text。Anthropic Batch API 5 折。"""
+        requests = [
+            {
+                "custom_id": cid,
+                "params": {
+                    "model": self.model,
+                    "max_tokens": 1024,
+                    "messages": [{"role": "user", "content": p}],
+                },
+            }
+            for cid, p in prompts.items()
+        ]
+        batch = self.client.messages.batches.create(requests=requests)
+        print(f"Anthropic Batch ID: {batch.id}")
+        while True:
+            b = self.client.messages.batches.retrieve(batch.id)
+            c = b.request_counts
+            print(f"  完成 {c.succeeded}, 處理中 {c.processing}, 失敗 {c.errored}")
+            if b.processing_status == "ended":
+                break
+            time.sleep(30)
+        out = {}
+        for entry in self.client.messages.batches.results(batch.id):
+            if entry.result.type == "succeeded":
+                out[entry.custom_id] = entry.result.message.content[0].text
+        return out
+
+
+class GeminiProvider:
+    def __init__(self, model):
+        from google import genai
+        api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+        if not api_key:
+            raise RuntimeError("請設 GEMINI_API_KEY 環境變數")
+        self.client = genai.Client(api_key=api_key)
+        self.model = model
+
+    def call_one(self, prompt):
+        resp = self.client.models.generate_content(model=self.model, contents=prompt)
+        return resp.text
+
+    def call_batch(self, prompts):
+        """Gemini 沒有 Anthropic 式 batch,逐筆呼叫但成本本身比 Claude 低。"""
+        out = {}
+        for cid, p in prompts.items():
+            try:
+                out[cid] = self.call_one(p)
+            except Exception as e:
+                print(f"  Gemini {cid} 失敗: {e}")
+        return out
+
+
+def make_provider(cfg):
+    p = cfg.get("provider", "anthropic").lower()
+    if p == "anthropic":
+        return AnthropicProvider(cfg["model"])
+    if p == "gemini":
+        return GeminiProvider(cfg["model"])
+    raise ValueError(f"未知 provider: {p}")
+
+
+def process_sync(provider, mail_map, cfg):
+    results = {}
+    for cid, mail in mail_map.items():
+        try:
+            text = provider.call_one(build_prompt(mail, cfg["max_body_chars"]))
+            results[cid] = parse_result(text)
+            print(f"  [sync] {cid}: {results[cid].get('category')}")
+        except Exception as e:
+            print(f"  [sync] {cid} 失敗: {e}")
+    return results
+
+
+def process_batch(provider, mail_map, cfg):
+    print(f"提交批次處理 ({len(mail_map)} 筆)...")
+    prompts = {cid: build_prompt(mail, cfg["max_body_chars"]) for cid, mail in mail_map.items()}
+    raw = provider.call_batch(prompts)
+    results = {}
+    for cid, text in raw.items():
+        try:
+            results[cid] = parse_result(text)
+        except Exception as e:
+            print(f"  解析失敗 {cid}: {e}")
+    return results
+
+
 def main():
     cfg = load_config()
-
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        print("錯誤:請先設定環境變數 ANTHROPIC_API_KEY")
-        print('PowerShell: [Environment]::SetEnvironmentVariable("ANTHROPIC_API_KEY","sk-ant-...","User")')
+    provider_name = cfg.get("provider", "anthropic").lower()
+    if provider_name == "anthropic" and not os.environ.get("ANTHROPIC_API_KEY"):
+        print("請設定環境變數 ANTHROPIC_API_KEY")
+        sys.exit(1)
+    if provider_name == "gemini" and not (os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")):
+        print("請設定環境變數 GEMINI_API_KEY")
         sys.exit(1)
 
     output_dir = Path(cfg["output_dir"])
@@ -154,12 +285,15 @@ def main():
     inbox = find_pst_folder(ns, cfg["pst_display_name"], cfg.get("folder_name", "Inbox"))
     print(f"找到資料夾: {inbox.FolderPath} (共 {inbox.Items.Count} 封)")
 
-    client = Anthropic()
     processed = load_state()
     items = list(inbox.Items)
     items.sort(key=lambda m: m.ReceivedTime, reverse=True)
 
-    new_count = 0
+    skipped = 0
+    rule_handled = 0
+    to_api = {}
+    mail_by_id = {}
+
     for mail in items:
         try:
             entry_id = mail.EntryID
@@ -169,20 +303,48 @@ def main():
             continue
         if getattr(mail, "Class", 0) != 43:
             continue
+
+        skip_cat = should_skip(mail, cfg)
+        if skip_cat:
+            try:
+                write_markdown(mail, rule_based_result(mail, skip_cat), output_dir)
+                processed.add(entry_id)
+                rule_handled += 1
+            except Exception as e:
+                print(f"規則寫入失敗: {e}")
+                skipped += 1
+            continue
+
+        cid = f"mail_{len(to_api)}"
+        to_api[cid] = mail
+        mail_by_id[cid] = mail
+
+    print(f"\n預過濾結果: 規則直接歸檔 {rule_handled} 封, 跳過 {skipped} 封, 送 API {len(to_api)} 封")
+
+    if not to_api:
+        save_state(processed)
+        print("沒有需要 AI 摘要的新信。")
+        return
+
+    provider = make_provider(cfg)
+    threshold = cfg.get("batch_threshold", 10)
+    if len(to_api) >= threshold:
+        results = process_batch(provider, to_api, cfg)
+    else:
+        results = process_sync(provider, to_api, cfg)
+
+    written = 0
+    for cid, result in results.items():
+        mail = mail_by_id[cid]
         try:
-            print(f"[{new_count+1}] {mail.SenderName} - {(mail.Subject or '')[:50]}")
-            result = summarize(client, mail, cfg["model"], cfg["max_body_chars"])
-            path = write_markdown(mail, result, output_dir)
-            print(f"    -> {path.name} [{result.get('category')}]")
-            processed.add(entry_id)
-            new_count += 1
-            if new_count % 5 == 0:
-                save_state(processed)
+            write_markdown(mail, result, output_dir)
+            processed.add(mail.EntryID)
+            written += 1
         except Exception as e:
-            print(f"    !! 失敗: {e}")
+            print(f"寫檔失敗 {cid}: {e}")
 
     save_state(processed)
-    print(f"\n完成。新處理 {new_count} 封。輸出: {output_dir}")
+    print(f"\n完成。規則 {rule_handled} 封 + AI {written} 封,輸出: {output_dir}")
 
 
 if __name__ == "__main__":
@@ -190,4 +352,6 @@ if __name__ == "__main__":
         main()
     except Exception as e:
         print(f"\n錯誤: {e}")
+        import traceback
+        traceback.print_exc()
         input("按 Enter 結束...")
