@@ -154,6 +154,62 @@ subject: {mail.Subject}
     return date_dir / fname
 
 
+def write_digest(digest, output_dir):
+    """跑完總結:列出需要追蹤/處理的信件"""
+    from datetime import datetime
+    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+    high = [(m, r) for m, r in digest if r.get("priority") == "high"]
+    medium = [(m, r) for m, r in digest if r.get("priority") == "medium"]
+    with_action = [(m, r) for m, r in digest if r.get("action_items")]
+
+    by_cat = {}
+    for m, r in digest:
+        by_cat.setdefault(r.get("category", "其他"), []).append((m, r))
+
+    def fmt_mail(m, r):
+        date = m.ReceivedTime.strftime("%m-%d %H:%M")
+        subject = (m.Subject or "(no subject)").replace("\n", " ")
+        return f"- **[{date}]** `{m.SenderName}` — {subject}\n  - {r.get('summary', '').splitlines()[0] if r.get('summary') else ''}"
+
+    lines = [f"# 信件追蹤清單", f"_產出時間: {now}_", f"_總處理: {len(digest)} 封_", ""]
+
+    lines.append(f"## 🔴 高優先 ({len(high)})")
+    if high:
+        for m, r in high:
+            lines.append(fmt_mail(m, r))
+            for a in r.get("action_items", []):
+                lines.append(f"  - [ ] {a}")
+    else:
+        lines.append("_(無)_")
+    lines.append("")
+
+    lines.append(f"## ✅ 待辦事項彙整 ({sum(len(r.get('action_items',[])) for _, r in with_action)} 項)")
+    if with_action:
+        for m, r in with_action:
+            date = m.ReceivedTime.strftime("%m-%d")
+            subject = (m.Subject or "")[:40]
+            lines.append(f"### [{date}] {subject}")
+            lines.append(f"_寄件人: {m.SenderName} | 優先度: {r.get('priority')}_")
+            for a in r.get("action_items", []):
+                lines.append(f"- [ ] {a}")
+            lines.append("")
+    else:
+        lines.append("_(無)_")
+    lines.append("")
+
+    lines.append(f"## 🟡 中優先 ({len(medium)})")
+    for m, r in medium:
+        lines.append(fmt_mail(m, r))
+    lines.append("")
+
+    lines.append("## 📊 分類統計")
+    for cat, mails in sorted(by_cat.items(), key=lambda x: -len(x[1])):
+        lines.append(f"- **{cat}**: {len(mails)} 封")
+
+    (output_dir / "_追蹤清單.md").write_text("\n".join(lines), encoding="utf-8")
+
+
 def rule_based_result(mail, category):
     return {
         "category": category,
@@ -388,17 +444,21 @@ def main():
         results = process_sync(provider, to_api, cfg)
 
     written = 0
+    digest = []
     for cid, result in results.items():
         mail = mail_by_id[cid]
         try:
             write_markdown(mail, result, output_dir)
             processed.add(mail.EntryID)
             written += 1
+            digest.append((mail, result))
         except Exception as e:
             print(f"寫檔失敗 {cid}: {e}")
 
     save_state(processed)
+    write_digest(digest, output_dir)
     print(f"\n完成。規則 {rule_handled} 封 + AI {written} 封,輸出: {output_dir}")
+    print(f"追蹤清單: {output_dir / '_追蹤清單.md'}")
 
 
 if __name__ == "__main__":
