@@ -155,59 +155,145 @@ subject: {mail.Subject}
 
 
 def write_digest(digest, output_dir):
-    """跑完總結:列出需要追蹤/處理的信件"""
+    """跑完總結:HTML 追蹤清單"""
     from datetime import datetime
+    from html import escape
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
 
     high = [(m, r) for m, r in digest if r.get("priority") == "high"]
     medium = [(m, r) for m, r in digest if r.get("priority") == "medium"]
+    low = [(m, r) for m, r in digest if r.get("priority") == "low"]
     with_action = [(m, r) for m, r in digest if r.get("action_items")]
+    total_actions = sum(len(r.get("action_items", [])) for _, r in with_action)
 
     by_cat = {}
     for m, r in digest:
         by_cat.setdefault(r.get("category", "其他"), []).append((m, r))
 
-    def fmt_mail(m, r):
+    def mail_card(m, r, priority_color):
         date = m.ReceivedTime.strftime("%m-%d %H:%M")
-        subject = (m.Subject or "(no subject)").replace("\n", " ")
-        return f"- **[{date}]** `{m.SenderName}` — {subject}\n  - {r.get('summary', '').splitlines()[0] if r.get('summary') else ''}"
+        sender = escape(m.SenderName or "")
+        subject = escape(m.Subject or "(no subject)")
+        summary = escape(r.get("summary", "")).replace("\n", "<br>")
+        cat = escape(r.get("category", ""))
+        actions_html = ""
+        if r.get("action_items"):
+            actions_html = "<ul class='actions'>" + "".join(
+                f"<li><label><input type='checkbox'> {escape(a)}</label></li>"
+                for a in r["action_items"]
+            ) + "</ul>"
+        return f"""
+        <div class="card" style="border-left-color:{priority_color}">
+          <div class="card-head">
+            <span class="date">{date}</span>
+            <span class="sender">{sender}</span>
+            <span class="cat">{cat}</span>
+          </div>
+          <div class="subject">{subject}</div>
+          <div class="summary">{summary}</div>
+          {actions_html}
+        </div>"""
 
-    lines = [f"# 信件追蹤清單", f"_產出時間: {now}_", f"_總處理: {len(digest)} 封_", ""]
+    cat_stats = "".join(
+        f"<tr><td>{escape(cat)}</td><td>{len(mails)}</td></tr>"
+        for cat, mails in sorted(by_cat.items(), key=lambda x: -len(x[1]))
+    )
 
-    lines.append(f"## 🔴 高優先 ({len(high)})")
-    if high:
-        for m, r in high:
-            lines.append(fmt_mail(m, r))
-            for a in r.get("action_items", []):
-                lines.append(f"  - [ ] {a}")
-    else:
-        lines.append("_(無)_")
-    lines.append("")
+    high_html = "".join(mail_card(m, r, "#e74c3c") for m, r in high) or "<p class='empty'>(無)</p>"
+    medium_html = "".join(mail_card(m, r, "#f39c12") for m, r in medium) or "<p class='empty'>(無)</p>"
+    low_html = "".join(mail_card(m, r, "#95a5a6") for m, r in low) or "<p class='empty'>(無)</p>"
 
-    lines.append(f"## ✅ 待辦事項彙整 ({sum(len(r.get('action_items',[])) for _, r in with_action)} 項)")
+    action_html = ""
     if with_action:
-        for m, r in with_action:
+        for m, r in sorted(with_action, key=lambda x: {"high":0,"medium":1,"low":2}.get(x[1].get("priority"),3)):
             date = m.ReceivedTime.strftime("%m-%d")
-            subject = (m.Subject or "")[:40]
-            lines.append(f"### [{date}] {subject}")
-            lines.append(f"_寄件人: {m.SenderName} | 優先度: {r.get('priority')}_")
-            for a in r.get("action_items", []):
-                lines.append(f"- [ ] {a}")
-            lines.append("")
+            subject = escape((m.Subject or "")[:60])
+            sender = escape(m.SenderName or "")
+            pri = r.get("priority", "medium")
+            pri_color = {"high":"#e74c3c","medium":"#f39c12","low":"#95a5a6"}.get(pri,"#95a5a6")
+            items = "".join(f"<li><label><input type='checkbox'> {escape(a)}</label></li>" for a in r["action_items"])
+            action_html += f"""
+            <div class="action-block" style="border-left-color:{pri_color}">
+              <div class="action-head"><b>[{date}] {subject}</b> <span class="meta">— {sender}</span></div>
+              <ul>{items}</ul>
+            </div>"""
     else:
-        lines.append("_(無)_")
-    lines.append("")
+        action_html = "<p class='empty'>(無)</p>"
 
-    lines.append(f"## 🟡 中優先 ({len(medium)})")
-    for m, r in medium:
-        lines.append(fmt_mail(m, r))
-    lines.append("")
+    html = f"""<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<title>信件追蹤清單 — {now}</title>
+<style>
+  * {{ box-sizing: border-box; }}
+  body {{ font-family: -apple-system, "Segoe UI", "Microsoft JhengHei", sans-serif; max-width: 1100px; margin: 0 auto; padding: 24px; background: #f5f6fa; color: #2c3e50; line-height: 1.6; }}
+  h1 {{ margin: 0 0 4px; }}
+  .meta-bar {{ color: #7f8c8d; margin-bottom: 24px; font-size: 14px; }}
+  .stats {{ display: flex; gap: 12px; margin-bottom: 28px; flex-wrap: wrap; }}
+  .stat {{ background: white; padding: 14px 20px; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.06); flex: 1; min-width: 140px; }}
+  .stat .num {{ font-size: 28px; font-weight: bold; }}
+  .stat .lbl {{ font-size: 12px; color: #7f8c8d; }}
+  .stat.high .num {{ color: #e74c3c; }}
+  .stat.action .num {{ color: #27ae60; }}
+  h2 {{ margin-top: 32px; padding-bottom: 8px; border-bottom: 2px solid #ecf0f1; }}
+  .card {{ background: white; padding: 14px 18px; margin-bottom: 10px; border-radius: 6px; border-left: 4px solid; box-shadow: 0 1px 2px rgba(0,0,0,0.04); }}
+  .card-head {{ font-size: 12px; color: #7f8c8d; margin-bottom: 4px; }}
+  .card-head .sender {{ margin-left: 12px; color: #34495e; }}
+  .card-head .cat {{ float: right; background: #ecf0f1; padding: 2px 8px; border-radius: 10px; }}
+  .subject {{ font-weight: 600; font-size: 15px; margin: 4px 0; }}
+  .summary {{ font-size: 14px; color: #555; }}
+  ul.actions {{ margin: 8px 0 0; padding-left: 0; list-style: none; }}
+  ul.actions li {{ padding: 3px 0; }}
+  .action-block {{ background: white; padding: 12px 16px; margin-bottom: 8px; border-radius: 6px; border-left: 4px solid; }}
+  .action-block ul {{ margin: 6px 0 0; padding-left: 20px; }}
+  .action-block .meta {{ color: #95a5a6; font-weight: normal; }}
+  table {{ background: white; border-collapse: collapse; width: 100%; border-radius: 6px; overflow: hidden; }}
+  th, td {{ padding: 10px 14px; text-align: left; border-bottom: 1px solid #ecf0f1; }}
+  th {{ background: #34495e; color: white; }}
+  .empty {{ color: #95a5a6; font-style: italic; }}
+  details {{ background: white; padding: 8px 14px; border-radius: 6px; margin-bottom: 10px; }}
+  summary {{ cursor: pointer; font-weight: 600; padding: 4px 0; }}
+  input[type=checkbox] {{ margin-right: 6px; }}
+  label {{ cursor: pointer; }}
+</style>
+</head>
+<body>
+  <h1>📬 信件追蹤清單</h1>
+  <div class="meta-bar">產出時間: {now} · 總處理 {len(digest)} 封</div>
 
-    lines.append("## 📊 分類統計")
-    for cat, mails in sorted(by_cat.items(), key=lambda x: -len(x[1])):
-        lines.append(f"- **{cat}**: {len(mails)} 封")
+  <div class="stats">
+    <div class="stat high"><div class="num">{len(high)}</div><div class="lbl">🔴 高優先</div></div>
+    <div class="stat"><div class="num">{len(medium)}</div><div class="lbl">🟡 中優先</div></div>
+    <div class="stat"><div class="num">{len(low)}</div><div class="lbl">⚪ 低優先</div></div>
+    <div class="stat action"><div class="num">{total_actions}</div><div class="lbl">✅ 待辦事項</div></div>
+  </div>
 
-    (output_dir / "_追蹤清單.md").write_text("\n".join(lines), encoding="utf-8")
+  <h2>🔴 高優先處理</h2>
+  {high_html}
+
+  <h2>✅ 待辦事項彙整</h2>
+  {action_html}
+
+  <details>
+    <summary>🟡 中優先 ({len(medium)})</summary>
+    {medium_html}
+  </details>
+
+  <details>
+    <summary>⚪ 低優先 ({len(low)})</summary>
+    {low_html}
+  </details>
+
+  <h2>📊 分類統計</h2>
+  <table>
+    <thead><tr><th>分類</th><th>數量</th></tr></thead>
+    <tbody>{cat_stats}</tbody>
+  </table>
+</body>
+</html>"""
+
+    (output_dir / "_追蹤清單.html").write_text(html, encoding="utf-8")
 
 
 def rule_based_result(mail, category):
@@ -458,7 +544,7 @@ def main():
     save_state(processed)
     write_digest(digest, output_dir)
     print(f"\n完成。規則 {rule_handled} 封 + AI {written} 封,輸出: {output_dir}")
-    print(f"追蹤清單: {output_dir / '_追蹤清單.md'}")
+    print(f"追蹤清單: {output_dir / '_追蹤清單.html'} (用瀏覽器開)")
 
 
 if __name__ == "__main__":
