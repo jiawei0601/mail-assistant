@@ -5,6 +5,7 @@ pyinstaller --onefile --name MailAssistant ^
   --hidden-import pythoncom ^
   --hidden-import anthropic ^
   --hidden-import google.genai ^
+  --hidden-import win32timezone ^
   mail_assistant.py
 
 echo.
