@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+build/
+dist/
+*.spec
+.processed.json
+config.json
+output/
+.venv/
+venv/
+.env
